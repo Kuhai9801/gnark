@@ -15,6 +15,7 @@ import (
 	"github.com/consensys/gnark/constraint"
 	"github.com/consensys/gnark/debug"
 	"github.com/consensys/gnark/frontend"
+	"github.com/consensys/gnark/frontend/cs/internal/wirealias"
 	"github.com/consensys/gnark/frontend/internal/expr"
 	"github.com/consensys/gnark/frontend/schema"
 	"github.com/consensys/gnark/internal/circuitdefer"
@@ -62,6 +63,8 @@ type builder[E constraint.Element] struct {
 
 	genericGate      constraint.BlueprintID
 	batchInverseGate constraint.BlueprintID
+	aliasGate        constraint.BlueprintID
+	aliases          wirealias.Set
 }
 
 // initialCapacity has quite some impact on frontend performance, especially on large circuits size
@@ -125,9 +128,11 @@ func newBuilder[E constraint.Element](field *big.Int, config frontend.CompileCon
 
 	bldr.tOne = bldr.cs.One()
 	bldr.cs.AddPublicVariable("1")
+	bldr.aliases.MarkNoAlias(0)
 
 	bldr.genericGate = bldr.cs.AddBlueprint(&constraint.BlueprintGenericR1C{})
 	bldr.batchInverseGate = bldr.cs.AddBlueprint(&constraint.BlueprintBatchInverse[E]{})
+	bldr.aliasGate = bldr.cs.AddBlueprint(&constraint.BlueprintWireAliases[E]{})
 
 	var zero E
 	bldr.eZero = expr.NewLinearExpression(0, zero)
@@ -143,18 +148,21 @@ func newBuilder[E constraint.Element](field *big.Int, config frontend.CompileCon
 // the wire's id to the number of wires, and returns it
 func (builder *builder[E]) newInternalVariable() expr.LinearExpression[E] {
 	idx := builder.cs.AddInternalVariable()
+	builder.aliases.MarkInternal(idx)
 	return expr.NewLinearExpression(idx, builder.tOne)
 }
 
 // PublicVariable creates a new public Variable
 func (builder *builder[E]) PublicVariable(f schema.LeafInfo) frontend.Variable {
 	idx := builder.cs.AddPublicVariable(f.FullName())
+	builder.aliases.MarkNoAlias(idx)
 	return expr.NewLinearExpression(idx, builder.tOne)
 }
 
 // SecretVariable creates a new secret Variable
 func (builder *builder[E]) SecretVariable(f schema.LeafInfo) frontend.Variable {
 	idx := builder.cs.AddSecretVariable(f.FullName())
+	builder.aliases.MarkNoAlias(idx)
 	return expr.NewLinearExpression(idx, builder.tOne)
 }
 
@@ -210,10 +218,20 @@ func (builder *builder[E]) getLinearExpression(_l interface{}) constraint.Linear
 		}
 		L = make(constraint.LinearExpression, 0, len(tl))
 		for _, t := range tl {
+			t = builder.canonicalTerm(t)
 			L = append(L, builder.cs.MakeTerm(t.Coeff, t.VID))
 		}
 	case constraint.LinearExpression:
-		L = tl
+		if builder.aliases.HasAliases() {
+			L = tl.Clone()
+			for i := range L {
+				if !L[i].IsConstant() {
+					L[i].VID = uint32(builder.aliases.Rep(int(L[i].VID)))
+				}
+			}
+		} else {
+			L = tl
+		}
 	default:
 		panic("invalid input for getLinearExpression") // sanity check
 	}
@@ -279,6 +297,8 @@ func (builder *builder[E]) Compile() (constraint.ConstraintSystemGeneric[E], err
 	log.Info().
 		Int("nbConstraints", builder.cs.GetNbConstraints()).
 		Msg("building constraint builder")
+
+	builder.applyWireAliases()
 
 	// ensure all inputs and hints are constrained
 	if err := builder.cs.CheckUnconstrainedWires(); err != nil {
@@ -402,6 +422,8 @@ func (builder *builder[E]) newHint(f solver.Hint, id solver.HintID, nbOutputs in
 	for i, in := range inputs {
 		if t, ok := in.(expr.LinearExpression[E]); ok {
 			assertIsSet(t)
+			t = builder.canonicalLinearExpression(t)
+			builder.markLinearExpressionNoAlias(t)
 			hintInputs[i] = builder.getLinearExpression(t)
 		} else {
 			c := builder.cs.FromInterface(in)
@@ -419,6 +441,8 @@ func (builder *builder[E]) newHint(f solver.Hint, id solver.HintID, nbOutputs in
 	// make the variables
 	res := make([]frontend.Variable, len(internalVariables))
 	for i, idx := range internalVariables {
+		builder.aliases.MarkInternal(idx)
+		builder.aliases.MarkNoAlias(idx)
 		res[i] = expr.NewLinearExpression(idx, builder.tOne)
 	}
 	return res, nil
@@ -503,7 +527,9 @@ func (*builder[E]) FrontendType() frontendtype.Type {
 
 // AddInstruction is used to add custom instructions to the constraint system.
 func (builder *builder[E]) AddInstruction(bID constraint.BlueprintID, calldata []uint32) []uint32 {
-	return builder.cs.AddInstruction(bID, calldata)
+	wires := builder.cs.AddInstruction(bID, calldata)
+	builder.markInstructionOutputsNoAlias(wires)
+	return wires
 }
 
 // AddBlueprint adds a custom blueprint to the constraint system.
@@ -512,7 +538,8 @@ func (builder *builder[E]) AddBlueprint(b constraint.Blueprint) constraint.Bluep
 }
 
 func (builder *builder[E]) InternalVariable(wireID uint32) frontend.Variable {
-	return expr.NewLinearExpression(int(wireID), builder.tOne)
+	builder.aliases.MarkNoAlias(int(wireID))
+	return expr.NewLinearExpression(builder.aliases.Rep(int(wireID)), builder.tOne)
 }
 
 // ToCanonicalVariable converts a frontend.Variable to a constraint system specific Variable
@@ -520,6 +547,8 @@ func (builder *builder[E]) InternalVariable(wireID uint32) frontend.Variable {
 func (builder *builder[E]) ToCanonicalVariable(in frontend.Variable) frontend.CanonicalVariable {
 	if t, ok := in.(expr.LinearExpression[E]); ok {
 		assertIsSet(t)
+		t = builder.canonicalLinearExpression(t)
+		builder.markLinearExpressionNoAlias(t)
 		return builder.getLinearExpression(t)
 	} else {
 		c := builder.cs.FromInterface(in)
@@ -527,4 +556,61 @@ func (builder *builder[E]) ToCanonicalVariable(in frontend.Variable) frontend.Ca
 		term.MarkConstant()
 		return constraint.LinearExpression{term}
 	}
+}
+
+type wireAliasApplier interface {
+	ApplyWireAliases(func(uint32) uint32, constraint.BlueprintID, constraint.BlueprintID, [][2]uint32)
+}
+
+func (builder *builder[E]) canonicalTerm(t expr.Term[E]) expr.Term[E] {
+	if !t.Coeff.IsZero() {
+		t.VID = builder.aliases.Rep(t.VID)
+	}
+	return t
+}
+
+func (builder *builder[E]) canonicalLinearExpression(l expr.LinearExpression[E]) expr.LinearExpression[E] {
+	if !builder.aliases.HasAliases() {
+		return l
+	}
+	res := l.Clone()
+	for i := range res {
+		res[i] = builder.canonicalTerm(res[i])
+	}
+	return res
+}
+
+func (builder *builder[E]) markLinearExpressionNoAlias(l expr.LinearExpression[E]) {
+	for _, t := range l {
+		if !t.Coeff.IsZero() {
+			builder.aliases.MarkNoAlias(t.VID)
+		}
+	}
+}
+
+func (builder *builder[E]) markInstructionOutputsNoAlias(wires []uint32) {
+	for _, wire := range wires {
+		vid := int(wire)
+		builder.aliases.MarkInternal(vid)
+		builder.aliases.MarkNoAlias(vid)
+	}
+}
+
+func (builder *builder[E]) applyWireAliases() {
+	if !builder.aliases.HasAliases() {
+		return
+	}
+	aliases := builder.aliasMappings()
+	builder.cs.(wireAliasApplier).ApplyWireAliases(func(vid uint32) uint32 {
+		return uint32(builder.aliases.Rep(int(vid)))
+	}, builder.genericGate, builder.aliasGate, aliases)
+}
+
+func (builder *builder[E]) aliasMappings() [][2]uint32 {
+	mappings := builder.aliases.Mappings()
+	res := make([][2]uint32, len(mappings))
+	for i, mapping := range mappings {
+		res[i] = [2]uint32{uint32(mapping[0]), uint32(mapping[1])}
+	}
+	return res
 }
