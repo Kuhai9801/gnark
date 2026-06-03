@@ -167,6 +167,7 @@ func (builder *builder[E]) DivUnchecked(i1, i2 frontend.Variable) frontend.Varia
 
 	// res * i2 == i1
 	res := builder.newInternalVariable()
+	builder.aliases.MarkNoAlias(res.VID)
 	builder.addPlonkConstraint(sparseR1C[E]{
 		xa: res.VID,
 		xb: i2.(expr.Term[E]).VID,
@@ -195,6 +196,7 @@ func (builder *builder[E]) Inverse(i1 frontend.Variable) frontend.Variable {
 	}
 	t := i1.(expr.Term[E])
 	res := builder.newInternalVariable()
+	builder.aliases.MarkNoAlias(res.VID)
 
 	// res * i1 - 1 == 0
 	constraint := sparseR1C[E]{

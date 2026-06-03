@@ -48,7 +48,8 @@ type builder[E constraint.Element] struct {
 	kvstore.Store
 
 	// map for recording boolean constrained variables (to not constrain them twice)
-	mtBooleans map[[16]byte][]expr.LinearExpression[E]
+	mtBooleans     map[[16]byte][]expr.LinearExpression[E]
+	mtBooleanTerms map[expr.Term[E]]struct{}
 
 	tOne        E
 	eZero, eOne expr.LinearExpression[E]
@@ -61,10 +62,10 @@ type builder[E constraint.Element] struct {
 	mbuf1 expr.LinearExpression[E]
 	mbuf2 expr.LinearExpression[E]
 
-	genericGate      constraint.BlueprintID
-	batchInverseGate constraint.BlueprintID
-	aliasGate        constraint.BlueprintID
-	aliases          wirealias.Set
+	genericGate       constraint.BlueprintID
+	batchInverseGate  constraint.BlueprintID
+	aliases           wirealias.Set
+	noAliasCompaction bool
 }
 
 // initialCapacity has quite some impact on frontend performance, especially on large circuits size
@@ -128,11 +129,9 @@ func newBuilder[E constraint.Element](field *big.Int, config frontend.CompileCon
 
 	bldr.tOne = bldr.cs.One()
 	bldr.cs.AddPublicVariable("1")
-	bldr.aliases.MarkNoAlias(0)
 
 	bldr.genericGate = bldr.cs.AddBlueprint(&constraint.BlueprintGenericR1C{})
 	bldr.batchInverseGate = bldr.cs.AddBlueprint(&constraint.BlueprintBatchInverse[E]{})
-	bldr.aliasGate = bldr.cs.AddBlueprint(&constraint.BlueprintWireAliases[E]{})
 
 	var zero E
 	bldr.eZero = expr.NewLinearExpression(0, zero)
@@ -155,14 +154,12 @@ func (builder *builder[E]) newInternalVariable() expr.LinearExpression[E] {
 // PublicVariable creates a new public Variable
 func (builder *builder[E]) PublicVariable(f schema.LeafInfo) frontend.Variable {
 	idx := builder.cs.AddPublicVariable(f.FullName())
-	builder.aliases.MarkNoAlias(idx)
 	return expr.NewLinearExpression(idx, builder.tOne)
 }
 
 // SecretVariable creates a new secret Variable
 func (builder *builder[E]) SecretVariable(f schema.LeafInfo) frontend.Variable {
 	idx := builder.cs.AddSecretVariable(f.FullName())
-	builder.aliases.MarkNoAlias(idx)
 	return expr.NewLinearExpression(idx, builder.tOne)
 }
 
@@ -249,9 +246,23 @@ func (builder *builder[E]) MarkBoolean(v frontend.Variable) {
 		}
 		return
 	}
+	if b, ok := builder.aliasConstantValue(v); ok {
+		if !(b.IsZero() || builder.isCstOne(b)) {
+			panic("MarkBoolean called a non-boolean constant")
+		}
+		return
+	}
 	// v is a linear expression
-	l := v.(expr.LinearExpression[E])
+	l := builder.canonicalLinearExpression(v.(expr.LinearExpression[E]))
 	sort.Sort(l)
+
+	if len(l) == 1 {
+		if builder.mtBooleanTerms == nil {
+			builder.mtBooleanTerms = make(map[expr.Term[E]]struct{}, 1)
+		}
+		builder.mtBooleanTerms[l[0]] = struct{}{}
+		return
+	}
 
 	key := l.HashCode()
 	list := builder.mtBooleans[key]
@@ -266,9 +277,20 @@ func (builder *builder[E]) IsBoolean(v frontend.Variable) bool {
 	if b, ok := builder.constantValue(v); ok {
 		return (b.IsZero() || builder.isCstOne(b))
 	}
+	if b, ok := builder.aliasConstantValue(v); ok {
+		return b.IsZero() || builder.isCstOne(b)
+	}
 	// v is a linear expression
-	l := v.(expr.LinearExpression[E])
+	l := builder.canonicalLinearExpression(v.(expr.LinearExpression[E]))
 	sort.Sort(l)
+
+	if len(l) == 1 {
+		if builder.mtBooleanTerms == nil {
+			return false
+		}
+		_, ok := builder.mtBooleanTerms[l[0]]
+		return ok
+	}
 
 	key := l.HashCode()
 	list, ok := builder.mtBooleans[key]
@@ -298,6 +320,9 @@ func (builder *builder[E]) Compile() (constraint.ConstraintSystemGeneric[E], err
 		Int("nbConstraints", builder.cs.GetNbConstraints()).
 		Msg("building constraint builder")
 
+	if builder.aliases.Invalidated() {
+		return nil, errors.New("wire alias invalidated by compiler escape hatch after equality aliasing")
+	}
 	builder.applyWireAliases()
 
 	// ensure all inputs and hints are constrained
@@ -350,6 +375,20 @@ func (builder *builder[E]) constantValue(v frontend.Variable) (E, bool) {
 		}
 	}
 	return builder.cs.FromInterface(v), true
+}
+
+func (builder *builder[E]) aliasConstantValue(v frontend.Variable) (E, bool) {
+	t, ok := builder.pureUnitTerm(v)
+	if !ok {
+		var zero E
+		return zero, false
+	}
+	cID, ok := builder.aliases.Constant(t.VID)
+	if !ok {
+		var zero E
+		return zero, false
+	}
+	return builder.cs.GetCoefficient(int(cID)), true
 }
 
 // toVariable will return (and allocate if necessary) a linearExpression from given value
@@ -527,6 +566,7 @@ func (*builder[E]) FrontendType() frontendtype.Type {
 
 // AddInstruction is used to add custom instructions to the constraint system.
 func (builder *builder[E]) AddInstruction(bID constraint.BlueprintID, calldata []uint32) []uint32 {
+	builder.markCustomInstructionCalldataNoAlias(calldata)
 	wires := builder.cs.AddInstruction(bID, calldata)
 	builder.markInstructionOutputsNoAlias(wires)
 	return wires
@@ -549,6 +589,7 @@ func (builder *builder[E]) ToCanonicalVariable(in frontend.Variable) frontend.Ca
 		assertIsSet(t)
 		t = builder.canonicalLinearExpression(t)
 		builder.markLinearExpressionNoAlias(t)
+		builder.disableNoAliasCompactionForLinearExpression(t)
 		return builder.getLinearExpression(t)
 	} else {
 		c := builder.cs.FromInterface(in)
@@ -559,11 +600,11 @@ func (builder *builder[E]) ToCanonicalVariable(in frontend.Variable) frontend.Ca
 }
 
 type wireAliasApplier interface {
-	ApplyWireAliases(func(uint32) uint32, constraint.BlueprintID, constraint.BlueprintID, [][2]uint32)
+	ApplyWireAliases(constraint.WireAliasResolver, constraint.BlueprintID, []uint32)
 }
 
 func (builder *builder[E]) canonicalTerm(t expr.Term[E]) expr.Term[E] {
-	if !t.Coeff.IsZero() {
+	if !t.Coeff.IsZero() && builder.aliases.HasAliases() {
 		t.VID = builder.aliases.Rep(t.VID)
 	}
 	return t
@@ -588,6 +629,15 @@ func (builder *builder[E]) markLinearExpressionNoAlias(l expr.LinearExpression[E
 	}
 }
 
+func (builder *builder[E]) disableNoAliasCompactionForLinearExpression(l expr.LinearExpression[E]) {
+	for _, t := range l {
+		if !t.Coeff.IsZero() && builder.isInternalWire(t.VID) {
+			builder.noAliasCompaction = true
+			return
+		}
+	}
+}
+
 func (builder *builder[E]) markInstructionOutputsNoAlias(wires []uint32) {
 	for _, wire := range wires {
 		vid := int(wire)
@@ -596,21 +646,73 @@ func (builder *builder[E]) markInstructionOutputsNoAlias(wires []uint32) {
 	}
 }
 
+func (builder *builder[E]) isInternalWire(vid int) bool {
+	offset := builder.cs.GetNbPublicVariables() + builder.cs.GetNbSecretVariables()
+	return vid >= offset && vid < offset+builder.cs.GetNbInternalVariables()
+}
+
+func (builder *builder[E]) markCustomInstructionCalldataNoAlias(calldata []uint32) {
+	internalOffset := uint32(builder.cs.GetNbPublicVariables() + builder.cs.GetNbSecretVariables())
+	nbWires := internalOffset + uint32(builder.cs.GetNbInternalVariables())
+	for _, v := range calldata {
+		if internalOffset <= v && v < nbWires {
+			builder.aliases.MarkNoAlias(int(v))
+			builder.noAliasCompaction = true
+		}
+	}
+}
+
 func (builder *builder[E]) applyWireAliases() {
 	if !builder.aliases.HasAliases() {
 		return
 	}
-	aliases := builder.aliasMappings()
-	builder.cs.(wireAliasApplier).ApplyWireAliases(func(vid uint32) uint32 {
-		return uint32(builder.aliases.Rep(int(vid)))
-	}, builder.genericGate, builder.aliasGate, aliases)
+	eliminated := builder.aliasEliminated()
+	if builder.noAliasCompaction {
+		builder.addAliasEqualityConstraints(eliminated)
+		return
+	}
+	if len(eliminated) == 0 {
+		return
+	}
+	builder.cs.(wireAliasApplier).ApplyWireAliases(builder.aliasResolver(), builder.genericGate, eliminated)
 }
 
-func (builder *builder[E]) aliasMappings() [][2]uint32 {
-	mappings := builder.aliases.Mappings()
-	res := make([][2]uint32, len(mappings))
-	for i, mapping := range mappings {
-		res[i] = [2]uint32{uint32(mapping[0]), uint32(mapping[1])}
+func (builder *builder[E]) addAliasEqualityConstraints(eliminated []uint32) {
+	for _, wire := range eliminated {
+		r := constraint.LinearExpression{builder.cs.MakeTerm(builder.tOne, int(wire))}
+		var o constraint.LinearExpression
+		if cID, ok := builder.aliases.Constant(int(wire)); ok {
+			o = constraint.LinearExpression{builder.cs.MakeTerm(builder.cs.GetCoefficient(int(cID)), 0)}
+		} else {
+			o = constraint.LinearExpression{builder.cs.MakeTerm(builder.tOne, builder.aliases.Rep(int(wire)))}
+		}
+		builder.cs.AddR1C(constraint.R1C{L: builder.cOne, R: r, O: o}, builder.genericGate)
+	}
+}
+
+func (builder *builder[E]) aliasResolver() constraint.WireAliasResolver {
+	return constraint.WireAliasResolver{
+		HasConstants: builder.aliases.HasConstantAliases(),
+		Wire: func(vid uint32) uint32 {
+			return uint32(builder.aliases.Rep(int(vid)))
+		},
+		Constant: func(vid uint32) (uint32, bool) {
+			return builder.aliases.Constant(int(vid))
+		},
+		AddCoeff: func(a, b uint32) uint32 {
+			return builder.cs.AddCoeff(builder.cs.Add(builder.cs.GetCoefficient(int(a)), builder.cs.GetCoefficient(int(b))))
+		},
+		MulCoeff: func(a, b uint32) uint32 {
+			return builder.cs.AddCoeff(builder.cs.Mul(builder.cs.GetCoefficient(int(a)), builder.cs.GetCoefficient(int(b))))
+		},
+	}
+}
+
+func (builder *builder[E]) aliasEliminated() []uint32 {
+	eliminated := builder.aliases.Eliminated()
+	res := make([]uint32, len(eliminated))
+	for i, wire := range eliminated {
+		res[i] = uint32(wire)
 	}
 	return res
 }

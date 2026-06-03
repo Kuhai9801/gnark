@@ -29,7 +29,18 @@ func (builder *builder[E]) AssertIsEqual(i1, i2 frontend.Variable) {
 	if !i1Constant && !i2Constant {
 		t1, ok1 := builder.pureUnitTerm(i1)
 		t2, ok2 := builder.pureUnitTerm(i2)
-		if ok1 && ok2 && builder.aliases.Union(t1.VID, t2.VID) {
+		if ok1 && ok2 && builder.aliasTerms(t1, t2) {
+			return
+		}
+	}
+	if i1Constant != i2Constant {
+		c := c1
+		v := i2
+		if i2Constant {
+			c = c2
+			v = i1
+		}
+		if t, ok := builder.pureUnitTerm(v); ok && builder.aliasTermToConstant(t, c) {
 			return
 		}
 	}
@@ -84,6 +95,53 @@ func (builder *builder[E]) pureUnitTerm(v frontend.Variable) (expr.Term[E], bool
 		return expr.Term[E]{}, false
 	}
 	return builder.canonicalTerm(t), true
+}
+
+func (builder *builder[E]) aliasTerms(t1, t2 expr.Term[E]) bool {
+	if builder.aliases.HasConstantAliases() {
+		if cID, hasConstant := builder.aliases.Constant(t1.VID); hasConstant && builder.isInternalWire(t2.VID) {
+			return builder.aliases.AliasToConstant(t2.VID, cID)
+		}
+		if cID, hasConstant := builder.aliases.Constant(t2.VID); hasConstant && builder.isInternalWire(t1.VID) {
+			return builder.aliases.AliasToConstant(t1.VID, cID)
+		}
+	}
+
+	ok := false
+	switch {
+	case builder.isInternalWire(t1.VID) && builder.isInternalWire(t2.VID):
+		ok = builder.aliases.Union(t1.VID, t2.VID)
+	case builder.isInternalWire(t1.VID):
+		ok = builder.aliases.AliasToWire(t1.VID, t2.VID)
+	case builder.isInternalWire(t2.VID):
+		ok = builder.aliases.AliasToWire(t2.VID, t1.VID)
+	default:
+		return false
+	}
+	if !ok {
+		return false
+	}
+	if builder.isBooleanTerm(t1) || builder.isBooleanTerm(t2) {
+		builder.MarkBoolean(t1)
+		builder.MarkBoolean(t2)
+	}
+	return true
+}
+
+func (builder *builder[E]) isBooleanTerm(t expr.Term[E]) bool {
+	if cID, ok := builder.aliases.Constant(t.VID); ok {
+		c := builder.cs.GetCoefficient(int(cID))
+		return c.IsZero() || builder.cs.IsOne(c)
+	}
+	_, ok := builder.mtBooleans[t]
+	return ok
+}
+
+func (builder *builder[E]) aliasTermToConstant(t expr.Term[E], c E) bool {
+	if !builder.isInternalWire(t.VID) {
+		return false
+	}
+	return builder.aliases.AliasToConstant(t.VID, builder.cs.AddCoeff(c))
 }
 
 // AssertIsDifferent fails if i1 == i2

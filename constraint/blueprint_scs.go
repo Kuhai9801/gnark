@@ -185,8 +185,7 @@ func (b *BlueprintSparseR1CMul[E]) Solve(s Solver[E], inst Instruction) error {
 
 	m0 = s.Mul(m0, m1)
 
-	s.SetValue(inst.Calldata[2], m0)
-	return nil
+	return setOrCheckOutput(s, inst.Calldata[2], m0, "qM*(xA*xB) == xC")
 }
 
 func (b *BlueprintSparseR1CMul[E]) DecompressSparseR1C(c *SparseR1C, inst Instruction) {
@@ -231,8 +230,7 @@ func (blueprint *BlueprintSparseR1CAdd[E]) Solve(s Solver[E], inst Instruction) 
 	a = s.Add(a, b)
 	a = s.Add(a, k)
 
-	s.SetValue(inst.Calldata[2], a)
-	return nil
+	return setOrCheckOutput(s, inst.Calldata[2], a, "qL*xA + qR*xB + qC == xC")
 }
 
 func (b *BlueprintSparseR1CAdd[E]) DecompressSparseR1C(c *SparseR1C, inst Instruction) {
@@ -290,6 +288,18 @@ func (b *BlueprintSparseR1CBool[E]) DecompressSparseR1C(c *SparseR1C, inst Instr
 	c.XB = c.XA
 	c.QL = inst.Calldata[1]
 	c.QM = inst.Calldata[2]
+}
+
+func setOrCheckOutput[E Element](s Solver[E], wireID uint32, value E, equation string) error {
+	if !s.IsSolved(wireID) {
+		s.SetValue(wireID, value)
+		return nil
+	}
+	expected := s.GetValue(CoeffIdOne, wireID)
+	if value != expected {
+		return fmt.Errorf("%s: %s != %s", equation, s.String(value), s.String(expected))
+	}
+	return nil
 }
 
 func updateInstructionTree(wires []uint32, tree InstructionTree) Level {

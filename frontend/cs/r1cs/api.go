@@ -264,6 +264,7 @@ func (builder *builder[E]) DivUnchecked(i1, i2 frontend.Variable) frontend.Varia
 
 	if !v2Constant {
 		res := builder.newInternalVariable()
+		builder.aliases.MarkNoAlias(res[0].VID)
 		// note that here we don't ensure that divisor is != 0
 		cID := builder.cs.AddR1C(builder.newR1C(v2, res, v1), builder.genericGate)
 		if debug.Debug {
@@ -301,6 +302,8 @@ func (builder *builder[E]) Div(i1, i2 frontend.Variable) frontend.Variable {
 	if !v2Constant {
 		res := builder.newInternalVariable()
 		v2Inv := builder.newInternalVariable()
+		builder.aliases.MarkNoAlias(res[0].VID)
+		builder.aliases.MarkNoAlias(v2Inv[0].VID)
 		// note that here we ensure that v2 can't be 0, but it costs us one extra constraint
 		c1 := builder.cs.AddR1C(builder.newR1C(v2, v2Inv, builder.cstOne()), builder.genericGate)
 		c2 := builder.cs.AddR1C(builder.newR1C(v1, v2Inv, res), builder.genericGate)
@@ -403,6 +406,7 @@ func (builder *builder[E]) Inverse(i1 frontend.Variable) frontend.Variable {
 
 	// allocate resulting frontend.Variable
 	res := builder.newInternalVariable()
+	builder.aliases.MarkNoAlias(res[0].VID)
 
 	cID := builder.cs.AddR1C(builder.newR1C(res, vars[0], builder.cstOne()), builder.genericGate)
 	if debug.Debug {

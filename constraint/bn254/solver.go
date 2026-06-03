@@ -402,11 +402,15 @@ func (s *solver) processInstruction(pi constraint.PackedInstruction, scratch *sc
 	if s.Type == constraint.SystemSparseR1CS {
 		switch blueprint.(type) {
 		case *constraint.BlueprintSparseR1CAdd[constraint.U64]:
-			s.solveSparseR1CAdd(calldata)
+			if err := s.solveSparseR1CAdd(calldata); err != nil {
+				return s.wrapErrWithDebugInfo(cID, err)
+			}
 			s.setSparseLRO(cID, calldata[0], calldata[1], calldata[2])
 			return nil
 		case *constraint.BlueprintSparseR1CMul[constraint.U64]:
-			s.solveSparseR1CMul(calldata)
+			if err := s.solveSparseR1CMul(calldata); err != nil {
+				return s.wrapErrWithDebugInfo(cID, err)
+			}
 			s.setSparseLRO(cID, calldata[0], calldata[1], calldata[2])
 			return nil
 		case *constraint.BlueprintSparseR1CBool[constraint.U64]:
@@ -790,7 +794,7 @@ func elementBitWindow(v *fr.Element, bitOffset, bitSize int) uint64 {
 
 // solveSparseR1CAdd: qL.xa + qR.xb + qC == xc.
 // Calldata layout: xa, xb, xc, qL, qR, qC.
-func (s *solver) solveSparseR1CAdd(calldata []uint32) {
+func (s *solver) solveSparseR1CAdd(calldata []uint32) error {
 	a := s.valueWithCoeff(calldata[3], calldata[0])
 	if calldata[4] != constraint.CoeffIdZero {
 		b := s.valueWithCoeff(calldata[4], calldata[1])
@@ -799,15 +803,26 @@ func (s *solver) solveSparseR1CAdd(calldata []uint32) {
 	if calldata[5] != constraint.CoeffIdZero {
 		a.Add(&a, &s.Coefficients[calldata[5]])
 	}
-	s.set(int(calldata[2]), a)
+	return s.setOrCheckSparseOutput(calldata[2], a, "qL*xA + qR*xB + qC == xC")
 }
 
 // solveSparseR1CMul: qM.(xa.xb) == xc.
 // Calldata layout: xa, xb, xc, qM.
-func (s *solver) solveSparseR1CMul(calldata []uint32) {
+func (s *solver) solveSparseR1CMul(calldata []uint32) error {
 	m := s.valueWithCoeff(calldata[3], calldata[0])
 	m.Mul(&m, &s.values[calldata[1]])
-	s.set(int(calldata[2]), m)
+	return s.setOrCheckSparseOutput(calldata[2], m, "qM*(xA*xB) == xC")
+}
+
+func (s *solver) setOrCheckSparseOutput(wireID uint32, value fr.Element, equation string) error {
+	if !s.solved[wireID] {
+		s.set(int(wireID), value)
+		return nil
+	}
+	if !value.Equal(&s.values[wireID]) {
+		return errors.New(equation + " doesn't hold")
+	}
+	return nil
 }
 
 // solveSparseR1CBool checks qL.xa + qM.(xa.xa) == 0.
