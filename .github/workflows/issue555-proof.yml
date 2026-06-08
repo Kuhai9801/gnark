@@ -1,0 +1,31 @@
+name: issue555-proof
+
+on:
+  push:
+    branches:
+      - ci-issue-555-evidence
+
+permissions:
+  contents: read
+
+env:
+  GO_VERSION: 1.25.x
+
+jobs:
+  proof:
+    runs-on: ubuntu-latest
+    steps:
+      - name: checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+      - name: install Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - name: changed-surface tests
+        run: |
+          go test ./internal/regression_tests/issue555 -count=1
+          go test -short ./internal/regression_tests/issue555 ./frontend/cs/internal/wirealias ./constraint ./frontend/cs/r1cs ./frontend/cs/scs -count=1
+      - name: benchmark
+        run: |
+          go test ./internal/regression_tests/issue555 -run '^$' -bench BenchmarkInternalEqualityCanonicalizationCompile -benchtime=100x -count=3
