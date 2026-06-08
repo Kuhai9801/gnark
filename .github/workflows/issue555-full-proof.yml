@@ -1,0 +1,38 @@
+name: issue555-full-proof
+
+on:
+  push:
+    branches:
+      - ci-issue-555-evidence
+
+permissions:
+  contents: read
+
+env:
+  ABIGEN_VERSION: v1.14.8
+  GO_VERSION: 1.25.x
+
+jobs:
+  full-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+      - name: install Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - name: install deps
+        run: |
+          go install github.com/ethereum/go-ethereum/cmd/abigen@${{ env.ABIGEN_VERSION }}
+          sudo add-apt-repository ppa:ethereum/ethereum
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends solc
+      - name: upstream PR tests
+        run: |
+          go test -short -v -p 4 -timeout=30m ./...
+          go test -short -v -p 4 -timeout=30m -tags=release_checks,solccheck .
+          go test -short -v -p 4 -timeout=30m -tags=prover_checks ./test/...
+          go test -short -v -p 4 -timeout=30m -tags=prover_checks ./examples/...
+          go test -short -v -run=NONE -fuzz=FuzzIntcomp -fuzztime=10s ./internal/backend/ioutils
