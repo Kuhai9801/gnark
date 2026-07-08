@@ -248,7 +248,7 @@ func (builder *builder[E]) MarkBoolean(v frontend.Variable) {
 		return
 	}
 	// v is a linear expression
-	l := v.(expr.LinearExpression[E])
+	l := builder.canonicalLinearExpression(v.(expr.LinearExpression[E]))
 	sort.Sort(l)
 
 	key := l.HashCode()
@@ -265,7 +265,7 @@ func (builder *builder[E]) IsBoolean(v frontend.Variable) bool {
 		return (b.IsZero() || builder.isCstOne(b))
 	}
 	// v is a linear expression
-	l := v.(expr.LinearExpression[E])
+	l := builder.canonicalLinearExpression(v.(expr.LinearExpression[E]))
 	sort.Sort(l)
 
 	key := l.HashCode()

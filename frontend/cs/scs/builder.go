@@ -296,7 +296,8 @@ func (builder *builder[E]) IsBoolean(v frontend.Variable) bool {
 	if b, ok := builder.constantValue(v); ok {
 		return (b.IsZero() || builder.cs.IsOne(b))
 	}
-	_, ok := builder.mtBooleans[v.(expr.Term[E])]
+	term := builder.canonicalTerm(v.(expr.Term[E]))
+	_, ok := builder.mtBooleans[term]
 	return ok
 }
 
@@ -310,7 +311,8 @@ func (builder *builder[E]) MarkBoolean(v frontend.Variable) {
 		}
 		return
 	}
-	builder.mtBooleans[v.(expr.Term[E])] = struct{}{}
+	term := builder.canonicalTerm(v.(expr.Term[E]))
+	builder.mtBooleans[term] = struct{}{}
 }
 
 var tVariable reflect.Type
@@ -822,17 +824,23 @@ func (builder *builder[E]) GetWireConstraints(wires []frontend.Variable, addMiss
 	res := make([][2]int, 0, len(wires))
 	iterator := builder.cs.GetSparseR1CIterator()
 	for c, constraintIdx := iterator.Next(), 0; c != nil; c, constraintIdx = iterator.Next(), constraintIdx+1 {
-		if _, ok := lookup[int(c.XA)]; ok {
+		xa, xb, xc := int(c.XA), int(c.XB), int(c.XC)
+		if builder.aliases.HasAliases() {
+			xa = builder.aliases.Rep(xa)
+			xb = builder.aliases.Rep(xb)
+			xc = builder.aliases.Rep(xc)
+		}
+		if _, ok := lookup[xa]; ok {
 			res = append(res, [2]int{nbPub + constraintIdx, 0})
-			delete(lookup, int(c.XA))
+			delete(lookup, xa)
 		}
-		if _, ok := lookup[int(c.XB)]; ok {
+		if _, ok := lookup[xb]; ok {
 			res = append(res, [2]int{nbPub + constraintIdx, 1})
-			delete(lookup, int(c.XB))
+			delete(lookup, xb)
 		}
-		if _, ok := lookup[int(c.XC)]; ok {
+		if _, ok := lookup[xc]; ok {
 			res = append(res, [2]int{nbPub + constraintIdx, 2})
-			delete(lookup, int(c.XC))
+			delete(lookup, xc)
 		}
 		if len(lookup) == 0 {
 			// we can break early if we found constraints for all the wires
@@ -962,17 +970,23 @@ func (builder *builder[E]) GetWiresConstraintExact(wires []frontend.Variable, ad
 	)
 
 	for c, constraintIdx := iterator.Next(), 0; c != nil; c, constraintIdx = iterator.Next(), constraintIdx+1 {
-		if _, ok := wireIDsSet[int(c.XA)]; ok {
-			foundWireIDPosition[int(c.XA)] = [2]int{nbPub + constraintIdx, 0}
-			delete(wireIDsSet, int(c.XA))
+		xa, xb, xc := int(c.XA), int(c.XB), int(c.XC)
+		if builder.aliases.HasAliases() {
+			xa = builder.aliases.Rep(xa)
+			xb = builder.aliases.Rep(xb)
+			xc = builder.aliases.Rep(xc)
 		}
-		if _, ok := wireIDsSet[int(c.XB)]; ok {
-			foundWireIDPosition[int(c.XB)] = [2]int{nbPub + constraintIdx, 1}
-			delete(wireIDsSet, int(c.XB))
+		if _, ok := wireIDsSet[xa]; ok {
+			foundWireIDPosition[xa] = [2]int{nbPub + constraintIdx, 0}
+			delete(wireIDsSet, xa)
 		}
-		if _, ok := wireIDsSet[int(c.XC)]; ok {
-			foundWireIDPosition[int(c.XC)] = [2]int{nbPub + constraintIdx, 2}
-			delete(wireIDsSet, int(c.XC))
+		if _, ok := wireIDsSet[xb]; ok {
+			foundWireIDPosition[xb] = [2]int{nbPub + constraintIdx, 1}
+			delete(wireIDsSet, xb)
+		}
+		if _, ok := wireIDsSet[xc]; ok {
+			foundWireIDPosition[xc] = [2]int{nbPub + constraintIdx, 2}
+			delete(wireIDsSet, xc)
 		}
 		if len(wireIDsSet) == 0 {
 			// we can break early if we found constraints for all the wires

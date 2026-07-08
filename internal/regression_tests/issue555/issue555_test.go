@@ -564,6 +564,109 @@ func internalEqualityAssignment(invalid bool) *internalEqualityCircuit {
 	return assignment
 }
 
+
+// --- Custom blueprint calldata escape regression tests ---
+
+// constantFromWireBlueprint is a custom blueprint that stores an input wire
+// in calldata but ignores it at solve time, always assigning a constant (6)
+// to the output wire. This ensures the equality between the input wire and
+// the output wire fails for witnesses that don't produce 6, providing a
+// stronger soundness test than a passthrough.
+type constantFromWireBlueprint struct{}
+
+func (b *constantFromWireBlueprint) CalldataSize() int {
+	return 1 // fixed single-wire-ID calldata
+}
+
+func (b *constantFromWireBlueprint) NbConstraints() int {
+	return 0
+}
+
+func (b *constantFromWireBlueprint) NbOutputs(inst constraint.Instruction) int {
+	return 1
+}
+
+func (b *constantFromWireBlueprint) UpdateInstructionTree(inst constraint.Instruction, tree constraint.InstructionTree) constraint.Level {
+	tree.InsertWire(inst.WireOffset, 0)
+	return 0
+}
+
+func (b *constantFromWireBlueprint) Solve(s constraint.Solver[constraint.U64], inst constraint.Instruction) error {
+	// Always assign 6 regardless of calldata contents.
+	s.SetValue(inst.WireOffset, s.FromInterface(6))
+	return nil
+}
+
+var _ constraint.BlueprintSolvable[constraint.U64] = (*constantFromWireBlueprint)(nil)
+
+// customBlueprintCalldataCircuit embeds an internal wire ID in custom blueprint
+// calldata after escaping via ToCanonicalVariable. The blueprint produces a
+// constant (6) so the equality only holds for witnesses where A*B == 6.
+type customBlueprintCalldataCircuit struct {
+	A, B frontend.Variable
+}
+
+func (c *customBlueprintCalldataCircuit) Define(api frontend.API) error {
+	internal := api.Mul(c.A, c.B)
+
+	// Proper escape: mark the wire no-alias and extract its wire ID.
+	canon := api.Compiler().ToCanonicalVariable(internal)
+	var wireID uint32
+	switch cv := canon.(type) {
+	case constraint.Term:
+		wireID = cv.VID
+	case constraint.LinearExpression:
+		if len(cv) > 0 {
+			wireID = cv[0].VID
+		}
+	}
+
+	blueprintID := api.Compiler().AddBlueprint(&constantFromWireBlueprint{})
+	outputWireIDs := api.Compiler().AddInstruction(blueprintID, []uint32{wireID})
+	output := api.Compiler().InternalVariable(outputWireIDs[0])
+
+	// Assert equality: A*B == 6. Because the wire was escaped, this equality
+	// must NOT be eliminated (both sides are no-alias).
+	api.AssertIsEqual(internal, output)
+	return nil
+}
+
+func TestCustomBlueprintCalldataEscapeKeepsEquality(t *testing.T) {
+	for _, tc := range builderCases {
+		t.Run(tc.name, func(t *testing.T) {
+			ccs := compile(t, tc.builder, &customBlueprintCalldataCircuit{})
+			// Expected: Mul (1 constraint) + AssertIsEqual (1 constraint) = 2.
+			if got := ccs.GetNbConstraints(); got != 2 {
+				t.Fatalf("expected escaped input equality to remain constrained (%d constraints), got %d", 2, got)
+			}
+
+			// Valid witness: A=2, B=3 so A*B = 6, matches the constant.
+			witness, err := frontend.NewWitness(&customBlueprintCalldataCircuit{
+				A: 2, B: 3,
+			}, ecc.BN254.ScalarField())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := ccs.IsSolved(witness); err != nil {
+				t.Fatalf("valid witness should solve: %v", err)
+			}
+
+			// Invalid witness: A=2, B=4 so A*B = 8, != 6. Must fail.
+			invalidWitness, err := frontend.NewWitness(&customBlueprintCalldataCircuit{
+				A: 2, B: 4,
+			}, ecc.BN254.ScalarField())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := ccs.IsSolved(invalidWitness); err == nil {
+				t.Fatal("invalid witness should fail because A*B=8 != blueprint constant 6")
+			}
+		})
+	}
+}
+
+
+
 func identityHint(_ *big.Int, inputs []*big.Int, outputs []*big.Int) error {
 	outputs[0].Set(inputs[0])
 	return nil

@@ -6,7 +6,13 @@ package constraint
 import "fmt"
 
 // BlueprintWireAliases assigns eliminated internal alias wires from their
-// canonical representative. It contributes no proof constraints.
+// canonical representative at solve time. It contributes no proof constraints.
+//
+// This is builder-internal machinery registered automatically during Compile
+// when internal equality assertions are canonicalized. The calldata encodes
+// (eliminatedWire, representativeWire) pairs produced by [Set.Mappings].
+// At solve time, each eliminated wire receives the already-solved value of
+// its representative.
 type BlueprintWireAliases[E Element] struct{}
 
 func (b BlueprintWireAliases[E]) CalldataSize() int {

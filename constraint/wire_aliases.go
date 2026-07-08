@@ -7,6 +7,21 @@ import "math"
 
 // ApplyWireAliases rewrites stored proof-relevant wire references through rep
 // and rebuilds the instruction tree. It does not remove or renumber wires.
+//
+// This is builder-internal machinery. Callers must ensure:
+//   - Every wire ID in aliases is an internal wire that has been certified
+//     safe to eliminate (marked internal, not marked no-alias).
+//   - Every representative wire is available at the correct solver level
+//     and will be solved before any eliminated wire is referenced.
+//   - Unknown/custom blueprint calldata (any blueprint not explicitly handled
+//     by the switch below) has had every embedded raw wire ID marked no-alias
+//     before the equality that produces the alias. Otherwise the calldata
+//     will carry stale eliminated wire IDs.
+//   - The rep function is directionally consistent with aliases: for every
+//     (eliminated, representative) pair, rep(eliminated) == representative.
+//   - genericSparseID identifies the blueprint used for generic sparse-R1C
+//     constraints; aliasID identifies a BlueprintWireAliases blueprint
+//     registered on this system.
 func (system *System) ApplyWireAliases(rep func(uint32) uint32, genericSparseID, aliasID BlueprintID, aliases [][2]uint32) {
 	if rep == nil {
 		return
