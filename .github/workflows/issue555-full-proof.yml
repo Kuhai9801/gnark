@@ -11,8 +11,41 @@ permissions:
 env:
   ABIGEN_VERSION: v1.14.8
   GO_VERSION: 1.25.x
+  GOLANGCI_LINT_VERSION: v2.10.1
 
 jobs:
+  staticcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - name: checkout code
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          fetch-depth: 0
+      - name: install Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - name: gofmt
+        run: if [[ -n $(gofmt -l .) ]]; then echo "please run gofmt"; exit 1; fi
+      - name: goimports
+        run: if [[ -n $(go tool goimports -l .) ]]; then echo "please run goimports"; exit 1; fi
+      - name: generated files should not be modified
+        run: |
+          go generate ./...
+          changed_files=$(git diff --name-only -- . ':(exclude)go.mod' ':(exclude)go.sum')
+          untracked_files=$(git ls-files --others --exclude-standard -- . ':(exclude)go.mod' ':(exclude)go.sum')
+          if [[ -n "${changed_files}" || -n "${untracked_files}" ]]; then
+            git status --porcelain
+            git diff -- . ':(exclude)go.mod' ':(exclude)go.sum'
+            exit 1
+          fi
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a
+        with:
+          version: ${{ env.GOLANGCI_LINT_VERSION }}
+          args: -v --timeout=5m
+
   full-test:
     runs-on: ubuntu-latest
     steps:
